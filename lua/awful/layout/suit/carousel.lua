@@ -264,13 +264,26 @@ end
 
 --- Clamp scroll offset to strip boundaries.
 -- If the strip is narrower than the viewport, center it.
-local function clamp_offset(offset, col_positions, wa_width)
+-- `margin` logic allows enforcement of peek offset symetrically.
+local function clamp_offset(offset, col_positions, wa_width, margin)
     if #col_positions == 0 then return 0 end
+    margin = margin or 0
     local sw = strip_width(col_positions)
     if sw <= wa_width then
         return -(wa_width - sw) / 2
     end
-    return clamp(offset, 0, sw - wa_width)
+    local lo = margin
+    local hi = math.max(lo, sw - wa_width - margin)
+    return clamp(offset, lo, hi)
+end
+
+--- Compute margin distance for the strip's scroll boundaries in pixels. Handles
+-- deferring to `peek_width` or `dynamic_peek_width` for scroll boundaries.
+local function compute_margin(peek, gap, dp, center_mode)
+    if center_mode ~= "never" and center_mode ~= "edge" then return 0 end
+    if not dp or dp < 0 then return 0 end
+    if dp >= 0 then dp = dp + gap end
+    return peek - dp
 end
 
 --- Compute scroll offset to center a column in the viewport.
@@ -429,13 +442,10 @@ function carousel._arrange_impl(p, vertical)
     local center_mode = get_beautiful().carousel_center_mode or carousel.center_mode
 
     local fcp = col_positions[focus_ci]
-    -- Apply dynamic peek to edge columns when dynamic_peek is 0 or higher
-    if dp >= 0 then
-        dp = peek - dp - gap
-        dp = focus_ci == 1 and dp or focus_ci == #col_positions and -dp or 0
-    else
-        dp = 0
-    end
+    -- Apply peek margins to strip edge boundaries
+    local margin = compute_margin(peek, gap, dp, center_mode)
+    local margin = focus_ci == 1 and margin or
+        focus_ci == #state.columns and -margin or 0
     if center_mode == "always" then
         state.target_offset = offset_to_center_column(fcp, effective_viewport)
     elseif center_mode == "never" then
@@ -444,9 +454,9 @@ function carousel._arrange_impl(p, vertical)
         local near_edge = fcp.canvas_x - candidate
         local far_edge = near_edge + fcp.pixel_width
         if far_edge <= 0 then
-            candidate = fcp.canvas_x + dp
+            candidate = fcp.canvas_x + margin
         elseif near_edge >= effective_viewport then
-            candidate = fcp.canvas_x + fcp.pixel_width - effective_viewport + dp
+            candidate = fcp.canvas_x + fcp.pixel_width - effective_viewport + margin
         end
         state.target_offset = candidate
     elseif center_mode == "edge" then
@@ -458,7 +468,7 @@ function carousel._arrange_impl(p, vertical)
         elseif far_edge > effective_viewport then
             candidate = fcp.canvas_x + fcp.pixel_width - effective_viewport
         end
-        state.target_offset = candidate + dp
+        state.target_offset = candidate + margin
     else -- "on-overflow" (default)
         local candidate = state.target_offset
         local near_edge = fcp.canvas_x - candidate
@@ -473,17 +483,10 @@ function carousel._arrange_impl(p, vertical)
     -- can show empty space at strip edges when centering edge columns)
     local should_clamp = center_mode ~= "always"
     if should_clamp then
-        local sw = strip_width(col_positions)
-        local clamp_vp = effective_viewport
-        if (center_mode == "never" or center_mode == "edge") and
-            focus_ci == #state.columns and sw > viewport_size and
-                state.dynamic_peek >= 0 then
-            clamp_vp = effective_viewport - dp
-        end
         state.target_offset = clamp_offset(
-            state.target_offset, col_positions, clamp_vp)
+            state.target_offset, col_positions, effective_viewport, margin)
         state.scroll_offset = clamp_offset(
-            state.scroll_offset, col_positions, effective_viewport)
+            state.scroll_offset, col_positions, effective_viewport, margin)
     end
 
     -- Animate or snap to target
@@ -524,8 +527,10 @@ function carousel.scroll_by(t, n)
     local effective_viewport = effective_viewport_size(viewport_size, peek)
     state.target_offset = state.target_offset + n * effective_viewport
     if state.col_positions then
+        local center_mode = get_beautiful().carousel_center_mode or carousel.center_mode
+        local margin = compute_margin(peek, state.gap or 0, state.dynamic_peek, center_mode)
         state.target_offset = clamp_offset(
-            state.target_offset, state.col_positions, effective_viewport)
+            state.target_offset, state.col_positions, effective_viewport, margin)
     end
     if carousel.scroll_duration > 0 and state.workarea then
         start_animation(state)
@@ -958,9 +963,11 @@ local function _make_gesture_binding(vertical)
             local viewport_size = scroll_extent(ts.workarea, vertical)
             local peek = ts.peek or 0
             local effective_viewport = effective_viewport_size(viewport_size, peek)
+            local center_mode = get_beautiful().carousel_center_mode or carousel.center_mode
+            local margin = compute_margin(peek, ts.gap or 0, ts.dynamic_peek, center_mode)
             local new_offset = swipe_start_offset - delta
             ts.scroll_offset = clamp_offset(
-                new_offset, ts.col_positions, effective_viewport)
+                new_offset, ts.col_positions, effective_viewport, margin)
             ts.target_offset = ts.scroll_offset
             apply_geometry(ts)
         end,
@@ -976,6 +983,8 @@ local function _make_gesture_binding(vertical)
             local viewport_size = scroll_extent(ts.workarea, vertical)
             local peek = ts.peek or 0
             local effective_viewport = effective_viewport_size(viewport_size, peek)
+            local center_mode = get_beautiful().carousel_center_mode or carousel.center_mode
+            local margin = compute_margin(peek, ts.gap or 0, ts.dynamic_peek, center_mode)
 
             -- Find column nearest viewport center
             local vp_center = ts.scroll_offset + effective_viewport / 2
@@ -994,7 +1003,7 @@ local function _make_gesture_binding(vertical)
             local fcp = ts.col_positions[best_ci]
             ts.target_offset = offset_to_center_column(fcp, effective_viewport)
             ts.target_offset = clamp_offset(
-                ts.target_offset, ts.col_positions, effective_viewport)
+                ts.target_offset, ts.col_positions, effective_viewport, margin)
 
             if carousel.scroll_duration > 0 then
                 start_animation(ts)
