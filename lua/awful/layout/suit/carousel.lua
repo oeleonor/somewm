@@ -17,7 +17,7 @@
 -- @module awful.layout.suit.carousel
 ---------------------------------------------------------------------------
 
-local capi = { client = client, screen = screen, awesome = awesome }
+local capi = { client = client, screen = screen }
 local math = math
 local ascreen = require("awful.screen")
 
@@ -65,9 +65,6 @@ carousel.width_presets = { 1/3, 1/2, 2/3, 1.0 }
 -- - "edge": scroll just enough to bring focused column into view, aligned to nearest edge
 carousel.center_mode = "on-overflow"
 
---- Scroll animation duration in seconds (0 = instant snap).
-carousel.scroll_duration = 0
-
 --- Peek width in pixels for showing adjacent column edges.
 -- @beautiful beautiful.carousel_peek_width
 -- @tparam[opt=0] number peek_width
@@ -90,7 +87,7 @@ local function get_state(t)
             target_offset = 0,
             columns = {},
             client_to_column = setmetatable({}, { __mode = "k" }),
-            -- Cached layout geometry (set during arrange, used by animation)
+            -- Cached layout geometry (set during arrange, used by gesture handle)
             col_positions = nil,
             workarea = nil,
             gap = 0,
@@ -293,23 +290,13 @@ local function offset_to_center_column(col_pos, wa_width)
     return center - wa_width / 2
 end
 
---- Apply geometry to all clients based on current scroll_offset.
--- This is the "render" step, separated from target computation so
--- the animation tick can call it independently. Reads all layout
--- geometry from the cached state fields (col_positions, workarea, gap).
+--- Apply geometry to all clients based on current scroll_offset. Reads all
+-- layout geometry from the cached state fields (col_positions, workarea, gap).
 local function apply_geometry(state)
     local col_positions = state.col_positions
     local wa = state.workarea
     local gap = state.gap
     if not col_positions or not wa then return end
-
-    -- Debug hook: set carousel._perf = { enabled=true, now=os.clock, frames={} }
-    -- to collect per-frame timing data in perf.frames[].duration_ms.
-    local perf = carousel._perf
-    local t0
-    if perf and perf.enabled then
-        t0 = perf.now()
-    end
 
     local vert = state.vertical
     local peek = state.peek or 0
@@ -340,54 +327,6 @@ local function apply_geometry(state)
             })
         end
     end
-
-    if perf and t0 then
-        local t1 = perf.now()
-        local frames = perf.frames
-        frames[#frames + 1] = { time = t1, duration_ms = (t1 - t0) * 1000 }
-    end
-end
-
----------------------------------------------------------------------------
--- Animation
----------------------------------------------------------------------------
-
---- Stop any running scroll animation for this tag state.
-local function stop_animation(state)
-    if state.anim_handle then
-        state.anim_handle:cancel()
-        state.anim_handle = nil
-    end
-end
-
---- Start or retarget a scroll animation toward target_offset.
--- Uses C-side frame-synced animation for jitter-free delivery.
-local function start_animation(state)
-    local duration = carousel.scroll_duration
-
-    -- Snap if animation disabled or distance negligible
-    if duration <= 0 or math.abs(state.scroll_offset - state.target_offset) < 0.5 then
-        stop_animation(state)
-        state.scroll_offset = state.target_offset
-        return
-    end
-
-    -- Cancel previous animation
-    stop_animation(state)
-
-    local start_val = state.scroll_offset
-    local target_val = state.target_offset
-
-    state.anim_handle = capi.awesome.start_animation(duration, "ease-out-cubic",
-        function(progress)
-            state.scroll_offset = start_val + (target_val - start_val) * progress
-            apply_geometry(state)
-        end,
-        function()
-            state.scroll_offset = target_val
-            apply_geometry(state)
-            state.anim_handle = nil
-        end)
 end
 
 ---------------------------------------------------------------------------
@@ -425,7 +364,7 @@ function carousel._arrange_impl(p, vertical)
     local effective_viewport = effective_viewport_size(viewport_size, peek)
     local col_positions = compute_column_positions(state.columns, effective_viewport)
 
-    -- Cache for animation and gesture use
+    -- Cache for gesture use
     state.col_positions = col_positions
     state.workarea = wa
     state.gap = gap
@@ -489,14 +428,7 @@ function carousel._arrange_impl(p, vertical)
             state.scroll_offset, col_positions, effective_viewport, margin)
     end
 
-    -- Animate or snap to target
-    if carousel.scroll_duration > 0 then
-        start_animation(state)
-    else
-        stop_animation(state)
-        state.scroll_offset = state.target_offset
-    end
-
+    state.scroll_offset = state.target_offset
     apply_geometry(state)
 end
 
@@ -532,11 +464,7 @@ function carousel.scroll_by(t, n)
         state.target_offset = clamp_offset(
             state.target_offset, state.col_positions, effective_viewport, margin)
     end
-    if carousel.scroll_duration > 0 and state.workarea then
-        start_animation(state)
-    else
-        state.scroll_offset = state.target_offset
-    end
+    state.scroll_offset = state.target_offset
 end
 
 ---------------------------------------------------------------------------
@@ -925,8 +853,8 @@ end
 
 --- Create a gesture binding for 3-finger swipe viewport panning.
 -- During the swipe, the viewport tracks finger movement 1:1 (direct control).
--- On release, the viewport animates to snap the nearest column to a clean
--- position and focuses that column's first client.
+-- On release, the viewport snaps to the nearest column and focuses that
+-- column's first client.
 -- @tparam[opt=false] boolean vertical Use vertical (dy) swipe axis.
 -- @treturn table The awful.gesture binding object (call :remove() to unbind).
 local function _make_gesture_binding(vertical)
@@ -950,7 +878,6 @@ local function _make_gesture_binding(vertical)
 
             swipe_tag = t
             local ts = get_state(t)
-            stop_animation(ts)
             swipe_start_offset = ts.scroll_offset
         end,
 
@@ -999,18 +926,14 @@ local function _make_gesture_binding(vertical)
                 end
             end
 
-            -- Animate to center that column
+            -- Center the target column
             local fcp = ts.col_positions[best_ci]
             ts.target_offset = offset_to_center_column(fcp, effective_viewport)
             ts.target_offset = clamp_offset(
                 ts.target_offset, ts.col_positions, effective_viewport, margin)
 
-            if carousel.scroll_duration > 0 then
-                start_animation(ts)
-            else
-                ts.scroll_offset = ts.target_offset
-                apply_geometry(ts)
-            end
+            ts.scroll_offset = ts.target_offset
+            apply_geometry(ts)
 
             -- Focus the nearest column's first client
             local col = ts.columns[best_ci]
